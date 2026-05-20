@@ -12,7 +12,7 @@ import os
 import cv2
 import numpy as np
 from PIL import Image
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple  # Dict needed for _classify_whole_image
 from dataclasses import dataclass
 
 
@@ -35,10 +35,11 @@ def _resolve_yolo_model() -> str:
 YOLO_MODEL: str = _resolve_yolo_model()
 
 PERSON_CONF: float = float(os.getenv("PERSON_CONF_MIN", "0.40"))
-WHOLE_IMAGE_CONF: float = 0.25
-ZONE_CONF: float = 0.25
-MIN_BOX_AREA: int = 5000
-IOU_THRESH: float = 0.50
+WHOLE_IMAGE_CONF: float = 0.20  # Lower for accessories
+ZONE_CONF: float = 0.25  # Higher to reduce false positives like boots
+MIN_BOX_AREA: int = 3000
+IOU_THRESH: float = 0.65
+ACCESSORY_YOLO_CONF: float = 0.20  # Lower for YOLO bags, CLIP filter will apply
 
 FULLBODY_ASPECT_RATIO: float = 1.6
 
@@ -54,20 +55,25 @@ ZONE_DEFINITIONS: List[Tuple[str, float, float]] = [
 ]
 
 CLIP_LABELS: List[str] = [
-    "t-shirt", "shirt", "sweater", "hoodie", "blouse",
+    "t-shirt", "shirt", "sweater", "hoodie", "blouse", "tank_top",
     "jacket", "coat", "blazer",
-    "jeans", "trousers", "shorts", "skirt", "dress",
-    "sneakers", "boots", "shoes",
+    "jeans", "trousers", "shorts", "skirt", "dress", "leggings",
+    "sneakers", "boots", "shoes", "sandals",
     "hat", "backpack", "handbag",
+    "hair",  # for hat disambiguation
+    "glasses", "sunglasses", "earrings",  # face accessories
+    "necklace",  # neck accessory
+    "bracelet", "watch",  # wrist accessories
+    "bra", "panties", "briefs",  # underwear
 ]
 
 CLIP_PROMPTS: Dict[str, List[str]] = {
     "t-shirt":   ["a plain t-shirt", "a white t-shirt", "person wearing a t-shirt"],
     "shirt":     ["a dress shirt", "a button-up shirt", "person in a shirt"],
     "sweater":   ["a knit sweater", "a woolen sweater", "person in a sweater"],
-    "hoodie":    ["a hoodie with hood", "a zip-up hoodie", "person wearing a hoodie"],
+    "hoodie":    ["a hoodie sweatshirt with hood", "a pullover hoodie", "hooded sweatshirt"],
     "blouse":    ["a women's blouse", "a silk blouse", "person wearing a blouse"],
-    "jacket":    ["a leather jacket", "a denim jacket", "a bomber jacket"],
+    "jacket":    ["an outerwear jacket", "a zip-up jacket", "a casual jacket", "a lightweight jacket", "wearing a jacket"],
     "coat":      ["a long coat", "a winter coat", "person in an overcoat"],
     "blazer":    ["a blazer suit jacket", "a formal blazer"],
     "jeans":     ["blue jeans", "denim jeans", "person wearing jeans"],
@@ -75,20 +81,42 @@ CLIP_PROMPTS: Dict[str, List[str]] = {
     "shorts":    ["denim shorts", "sport shorts", "person in shorts"],
     "skirt":     ["a skirt", "a mini skirt", "a long skirt"],
     "dress":     ["a dress", "a summer dress", "a woman in a dress"],
-    "sneakers":  ["sneakers", "white sneakers", "running shoes"],
-    "boots":     ["leather boots", "ankle boots", "person wearing boots"],
-    "shoes":     ["leather shoes", "loafers", "formal shoes on feet"],
-    "hat":       ["a baseball cap", "a beanie hat", "person wearing a hat"],
-    "backpack":  ["a backpack on back", "person with a backpack"],
-    "handbag":   ["a handbag", "a purse", "woman carrying a handbag"],
+    "sneakers":  ["sneakers with laces", "sport sneakers", "casual running shoes", "athletic footwear"],
+    "boots":     ["high leather boots", "winter boots", "knee-high boots", "ankle boots"],
+    "shoes":     ["formal leather shoes", "dress shoes", "oxford shoes", "flat shoes"],
+    "sandals":   ["open-toe sandals with straps", "flat sandals", "gladiator sandals", "strappy sandals on feet"],
+    "hat":       ["a baseball cap", "a beanie hat", "a sun hat", "headwear on head"],
+    "backpack":  ["a backpack on person's back", "school backpack", "hiking backpack with straps", "rucksack on shoulders"],
+    "handbag":   ["a woman's handbag", "a small purse carried by hand", "clutch purse", "designer handbag", "tote bag held by handle"],
+    "hair":      ["natural hair", "hairstyle", "person's hair", "bald head"],
+    "tank_top":  ["a tank top", "a sleeveless shirt", "a muscle shirt", "person wearing a tank top"],
+    "leggings":  ["black leggings", "tight leggings", "person wearing leggings", "yoga pants"],
+    "bra":       ["a woman's bra", "a bra, lingerie", "a bralette"],
+    "panties":   ["women's panties", "underwear panties", "women's briefs"],
+    "briefs":    ["men's briefs", "men's underwear", "cotton briefs", "boxer briefs"],
+    "glasses":   ["a person wearing glasses", "eyeglasses on a face", "reading glasses"],
+    "sunglasses":["a person wearing sunglasses", "dark sunglasses on face"],
+    "earrings":  ["earrings hanging from ears", "stud earrings", "hoop earrings on ears", "gold earrings", "silver earrings"],
+    "necklace":  ["a chain necklace around neck", "pendant on necklace", "choker necklace", "neck jewelry", "pearls around neck"],
+    "bracelet":  ["a bracelet around wrist", "cuff bracelet", "charm bracelet", "wrist bangle", "bracelet chain on wrist"],
+    "watch":     ["a wristwatch", "a watch on wrist", "luxury watch on hand"],
 }
 
 ZONE_LABEL_FILTER: Dict[str, List[str]] = {
-    "head":       ["hat"],
-    "upper_body": ["t-shirt", "shirt", "sweater", "hoodie", "blouse", "jacket", "coat", "blazer", "dress"],
-    "lower_body": ["jeans", "trousers", "shorts", "skirt", "dress"],
-    "feet":       ["sneakers", "boots", "shoes"],
+    "head":       [],  # handled manually via _classify_head_zone
+    "upper_body": ["t-shirt", "shirt", "sweater", "hoodie", "blouse", "tank_top", "jacket", "coat", "blazer", "dress", "bra"],
+    "lower_body": ["jeans", "trousers", "shorts", "skirt", "dress", "leggings", "panties", "briefs"],
+    "feet":       ["sneakers", "boots", "shoes", "sandals"],
 }
+
+# Accessory detection constants
+HAT_CONF_MIN: float = 0.40
+HAIR_CONF_MAX_FOR_HAT: float = 0.50
+ACCESSORY_CONF: float = 0.28  # Lowered for better accessory detection on full-body images
+
+FACE_ACCESSORY_LABELS: List[str] = ["glasses", "sunglasses", "earrings"]
+NECK_ACCESSORY_LABELS: List[str] = ["necklace"]
+WRIST_ACCESSORY_LABELS: List[str] = ["bracelet", "watch"]
 
 
 @dataclass
@@ -239,12 +267,21 @@ def _iou(a: Tuple[int,int,int,int], b: Tuple[int,int,int,int]) -> float:
 
 
 def _nms(items: List["DetectedItem"], iou_thresh: float = IOU_THRESH) -> List["DetectedItem"]:
-    """Greedy NMS: keep highest-confidence item, suppress overlapping ones."""
+    """Greedy NMS: keep highest-confidence item, suppress overlapping ones.
+    Accessories (glasses, earrings, bracelet, watch, necklace) are kept even with overlap."""
     if not items:
         return []
+    
+    ACCESSORY_NAMES = {"glasses", "sunglasses", "earrings", "necklace", "bracelet", "watch"}
+    
     sorted_items = sorted(items, key=lambda d: d.confidence, reverse=True)
     kept: List["DetectedItem"] = []
     for candidate in sorted_items:
+        # Accessories are never suppressed by NMS
+        if candidate.class_name in ACCESSORY_NAMES:
+            kept.append(candidate)
+            continue
+            
         suppressed = any(
             _iou(candidate.bbox, k.bbox) > iou_thresh
             for k in kept
@@ -282,6 +319,108 @@ def _crop_zone(
     return image[zy1:zy2, x1c:x2c].copy()
 
 
+def _classify_head_zone(
+    crop: np.ndarray,
+    bbox: Tuple[int, int, int, int],
+) -> List[DetectedItem]:
+    """
+    Hat-vs-hair disambiguation + face accessory detection.
+    Returns 0..2 DetectedItems (hat and/or face accessory).
+    """
+    results: List[DetectedItem] = []
+
+    hat_label, hat_conf = _clip_classify(crop, allowed_labels=["hat"])
+    hair_label, hair_conf = _clip_classify(crop, allowed_labels=["hair"])
+    print(f"  zone head: hat={hat_conf:.3f}, hair={hair_conf:.3f}")
+
+    # Accept hat only if confident AND more confident than hair
+    if hat_conf >= HAT_CONF_MIN and hat_conf > hair_conf:
+        results.append(DetectedItem(
+            bbox=bbox,
+            confidence=round(hat_conf, 3),
+            class_id=-1,
+            class_name="hat",
+            cropped_image=crop,
+        ))
+        print(f"  zone head -> hat accepted ({hat_conf:.3f} > hair {hair_conf:.3f})")
+    else:
+        print(f"  zone head -> hat rejected (hat={hat_conf:.3f}, hair={hair_conf:.3f})")
+
+    # Check face accessories
+    face_label, face_conf = _clip_classify(crop, allowed_labels=FACE_ACCESSORY_LABELS)
+    print(f"  zone head accessory: {face_label} ({face_conf:.3f})")
+    if face_conf >= ACCESSORY_CONF and face_label != "unknown":
+        results.append(DetectedItem(
+            bbox=bbox,
+            confidence=round(face_conf, 3),
+            class_id=-1,
+            class_name=face_label,
+            cropped_image=crop,
+        ))
+
+    return results
+
+
+def _classify_wrist_accessories(
+    image: np.ndarray,
+    px1: int, py1: int, px2: int, py2: int,
+    y_start: float, y_end: float,
+) -> List[DetectedItem]:
+    """
+    Check wrist strips of upper_body zone for bracelet/watch.
+    Also checks neck area for necklace.
+    """
+    results: List[DetectedItem] = []
+    ph = py2 - py1
+    pw = px2 - px1
+    h_img, w_img = image.shape[:2]
+
+    zone_y1 = max(0, py1 + int(ph * y_start))
+    zone_y2 = min(h_img, py1 + int(ph * y_end))
+    zone_x1 = max(0, px1)
+    zone_x2 = min(w_img, px2)
+    strip_w = max(1, int(pw * 0.18))
+
+    # Check left and right wrists
+    for side, x1s, x2s in [
+        ("left", zone_x1, zone_x1 + strip_w),
+        ("right", zone_x2 - strip_w, zone_x2),
+    ]:
+        if x2s <= x1s or zone_y2 <= zone_y1:
+            continue
+        wrist_crop = image[zone_y1:zone_y2, x1s:x2s].copy()
+        if wrist_crop.size == 0:
+            continue
+        label, conf = _clip_classify(wrist_crop, allowed_labels=WRIST_ACCESSORY_LABELS)
+        print(f"  wrist {side}: {label} ({conf:.3f})")
+        if conf >= ACCESSORY_CONF and label != "unknown":
+            results.append(DetectedItem(
+                bbox=(x1s, zone_y1, x2s, zone_y2),
+                confidence=round(conf, 3),
+                class_id=-1,
+                class_name=label,
+                cropped_image=wrist_crop,
+            ))
+
+    # Check neck area (top part of upper_body)
+    neck_y2 = max(0, py1 + int(ph * (y_start + 0.12)))
+    if neck_y2 > zone_y1:
+        neck_crop = image[zone_y1:neck_y2, zone_x1:zone_x2].copy()
+        if neck_crop.size > 0:
+            label, conf = _clip_classify(neck_crop, allowed_labels=NECK_ACCESSORY_LABELS)
+            print(f"  neck: {label} ({conf:.3f})")
+            if conf >= ACCESSORY_CONF and label != "unknown":
+                results.append(DetectedItem(
+                    bbox=(zone_x1, zone_y1, zone_x2, neck_y2),
+                    confidence=round(conf, 3),
+                    class_id=-1,
+                    class_name=label,
+                    cropped_image=neck_crop,
+                ))
+
+    return results
+
+
 def _zones_from_person(
     image: np.ndarray,
     px1: int, py1: int, px2: int, py2: int,
@@ -304,42 +443,131 @@ def _zones_from_person(
         if ch * cw < MIN_BOX_AREA:
             print(f"  zone {zone_name}: too small ({ch}x{cw})")
             continue
+
+        zy1 = max(0, py1 + int(ph * y_start))
+        zy2 = min(h_img, py1 + int(ph * y_end))
+        bbox = (px1, zy1, min(w_img, px2), zy2)
+
+        # Special handling for head zone (hat + face accessories)
+        if zone_name == "head":
+            for item in _classify_head_zone(crop, bbox):
+                if item.class_name not in seen_labels:
+                    seen_labels.add(item.class_name)
+                    items.append(item)
+            continue
+
+        # Regular zone classification
         allowed = ZONE_LABEL_FILTER.get(zone_name)
         label, conf = _clip_classify(crop, allowed_labels=allowed)
         print(f"  zone {zone_name}: {label} ({conf:.3f})")
         if conf < ZONE_CONF or label in seen_labels or label == "unknown":
             continue
-        zy1 = max(0, py1 + int(ph * y_start))
-        zy2 = min(h_img, py1 + int(ph * y_end))
         seen_labels.add(label)
         items.append(DetectedItem(
-            bbox=(px1, zy1, min(w_img, px2), zy2),
+            bbox=bbox,
             confidence=round(conf, 3),
             class_id=-1,
             class_name=label,
             cropped_image=crop,
         ))
 
+        # Check for wrist/neck accessories in upper_body zone
+        if zone_name == "upper_body":
+            for acc in _classify_wrist_accessories(image, px1, py1, px2, py2, y_start, y_end):
+                if acc.class_name not in seen_labels:
+                    seen_labels.add(acc.class_name)
+                    items.append(acc)
+
     return items
 
 
 def _classify_whole_image(image: np.ndarray) -> List[DetectedItem]:
     """
-    No-person fallback: top-1 CLIP on the whole image.
-    Returns exactly 0 or 1 DetectedItem.
+    No-person fallback: multi-label CLIP classification on whole image.
+    Returns all items above threshold (for accessories like glasses, bags).
     """
     h, w = image.shape[:2]
-    label, conf = _clip_classify(image)
-    print(f"[detection] Whole-image top-1: {label} ({conf:.3f})")
-    if conf < WHOLE_IMAGE_CONF or label == "unknown":
-        return []
-    return [DetectedItem(
-        bbox=(0, 0, w, h),
-        confidence=round(conf, 3),
-        class_id=-1,
-        class_name=label,
-        cropped_image=image.copy(),
-    )]
+    
+    # Get all label scores
+    import torch
+    model, processor, device = _get_clip()
+    text_embs, text_labels = _get_text_embeddings()
+    
+    pil_img = Image.fromarray(image.astype(np.uint8)).convert("RGB")
+    inputs = processor(images=pil_img, return_tensors="pt")
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    with torch.no_grad():
+        out = model.get_image_features(**inputs)
+    if isinstance(out, torch.Tensor):
+        img_raw = out.float()
+    else:
+        img_raw = out.pooler_output.float() if out.pooler_output is not None else out.last_hidden_state[:, 0, :].float()
+    img_feat = (img_raw / img_raw.norm(dim=-1, keepdim=True)).cpu().numpy()[0]
+    
+    sims = text_embs @ img_feat
+    
+    # Aggregate by label (max score per label)
+    label_scores: Dict[str, float] = {}
+    for label, score in zip(text_labels, sims):
+        if label not in label_scores or float(score) > label_scores[label]:
+            label_scores[label] = float(score)
+    
+    # Return all items above threshold, sorted by confidence
+    results = []
+    sorted_items = sorted(label_scores.items(), key=lambda x: x[1], reverse=True)
+    print(f"[detection] Whole-image candidates: {[(l, round(c, 3)) for l, c in sorted_items[:5]]}")
+    
+    # Exclude underwear from whole-image detection (only via zones on persons)
+    EXCLUDE_FROM_WHOLE_IMAGE = {"bra", "panties", "briefs", "hair"}
+    
+    # Mutually exclusive groups - only take top item from each group
+    MUTUALLY_EXCLUSIVE = {
+        "bags": {"backpack", "handbag"},
+        "footwear": {"sneakers", "boots", "shoes", "sandals"},
+        "face_accessories": {"glasses", "sunglasses"},
+        "jewelry": {"earrings", "necklace", "bracelet", "watch"},  # wrist accessories mutually exclusive
+    }
+    seen_groups: set = set()
+    
+    for label, conf in sorted_items:
+        if conf < WHOLE_IMAGE_CONF or label == "unknown":
+            continue
+        if label in EXCLUDE_FROM_WHOLE_IMAGE:
+            continue
+        
+        # Check if this label belongs to a mutually exclusive group
+        skip_label = False
+        for group_name, group_labels in MUTUALLY_EXCLUSIVE.items():
+            if label in group_labels:
+                if group_name in seen_groups:
+                    print(f"  skipping {label} ({conf:.3f}) - {group_name} already taken")
+                    skip_label = True
+                    break
+                seen_groups.add(group_name)
+                break
+        if skip_label:
+            continue
+        
+        # Skip clothing items with very low confidence (accessories more forgiving)
+        is_accessory = label in {"glasses", "sunglasses", "earrings", "necklace", "bracelet", "watch", "hat", "backpack", "handbag"}
+        min_conf = 0.22 if is_accessory else 0.23  # Slightly lower threshold for clothing to catch jackets
+        if conf < min_conf:
+            continue
+        results.append(DetectedItem(
+            bbox=(0, 0, w, h),
+            confidence=round(conf, 3),
+            class_id=-1,
+            class_name=label,
+            cropped_image=image.copy(),
+        ))
+        # For whole-image (no person), take only top-1 to avoid duplicates
+        # Multiple items on flat surface rarely overlap, so best match is sufficient
+        if len(results) >= 1:
+            break
+    
+    print(f"[detection] Whole-image returning {len(results)} item(s): " + 
+          ", ".join(f"{r.class_name}({r.confidence:.3f})" for r in results))
+    return results
 
 
 def _box_valid(x1: int, y1: int, x2: int, y2: int) -> bool:
@@ -385,7 +613,7 @@ def detect_clothes(
                 zone_items = _zones_from_person(image, x1c, y1c, x2c, y2c)
                 detections.extend(zone_items)
 
-            elif class_id in COCO_ACCESSORY_CLASSES:
+            elif class_id in COCO_ACCESSORY_CLASSES and confidence >= ACCESSORY_YOLO_CONF:
                 acc_name = COCO_ACCESSORY_CLASSES[class_id]
                 crop = image[y1c:y2c, x1c:x2c].copy() if return_crops else None
                 detections.append(DetectedItem(
@@ -395,6 +623,7 @@ def detect_clothes(
                     class_name=acc_name,
                     cropped_image=crop,
                 ))
+                print(f"  YOLO accessory: {acc_name} ({confidence:.3f})")
 
     print(f"[detection] YOLO persons found: {n_persons}")
 
@@ -422,6 +651,12 @@ def draw_detections(image: np.ndarray, detections: List[DetectedItem]) -> np.nda
         "dress": (220, 0, 220), "bottom": (30, 144, 255), "pants": (30, 144, 255),
         "shoes": (0, 180, 180), "backpack": (200, 100, 0),
         "handbag": (180, 50, 180), "tie": (255, 80, 80),
+        "glasses": (255, 255, 0), "sunglasses": (128, 128, 0),
+        "earrings": (255, 192, 203), "necklace": (218, 165, 32),
+        "bracelet": (0, 255, 255), "watch": (192, 192, 192),
+        "tank_top": (144, 238, 144), "leggings": (221, 160, 221),
+        "sandals": (210, 105, 30), "boots": (139, 69, 19),
+        "bra": (255, 105, 180), "panties": (255, 20, 147), "briefs": (255, 69, 0),
     }
     img = image.copy()
     for det in detections:
