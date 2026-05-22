@@ -1,28 +1,12 @@
 import os
 from typing import Dict, List, Optional
 
-
 def generate_style_advice(
     detected_items: List[str],
     suggestions: Dict[str, List[str]],
     style: str = "casual",
     openai_api_key: Optional[str] = None,
 ) -> str:
-    """
-    Generate a natural-language styling advice string.
-
-    If OPENAI_API_KEY is available (env var or parameter), calls GPT-3.5-turbo.
-    Otherwise falls back to a deterministic rule-based template.
-
-    Args:
-        detected_items: raw class names from detector
-        suggestions:    category -> list of suggested items
-        style:          outfit style string
-        openai_api_key: override env var
-
-    Returns:
-        Plain-text fashion advice paragraph.
-    """
     api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
 
     if api_key:
@@ -42,19 +26,16 @@ def _call_openai(
 
         client = openai.OpenAI(api_key=api_key)
 
-        items_str = ", ".join(detected_items) if detected_items else "ничего не обнаружено"
+        items_str = ", ".join(detected_items) if detected_items else "ничего"
+        
         sugg_lines = []
         for cat, items in suggestions.items():
-            sugg_lines.append(f"  {cat}: {', '.join(items)}")
-        sugg_str = "\n".join(sugg_lines) if sugg_lines else "нет рекомендаций"
-
-        prompt = (
-            f"Ты — стилист-эксперт. Пользователь носит: {items_str}.\n"
-            f"Желаемый стиль: {style}.\n"
-            f"Система предлагает добавить:\n{sugg_str}\n\n"
-            "Напиши короткий (3–4 предложения) совет на русском языке: "
-            "как дополнить образ, какие цвета и фасоны выбрать, чтобы получился стильный лук."
-        )
+            if items:
+                sugg_lines.append(f"{cat}: {', '.join(items[:3])}")
+        
+        prompt = f"""Ты стилист. Человек надел: {items_str}. Хочет выглядеть {style}.
+Рекомендую добавить: {', '.join(sugg_lines) if sugg_lines else 'ничего конкретного'}.
+Дай короткий совет (2-3 предложения) по-русски: что ещё можно надеть, как сочетать цвета и фасоны."""
 
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
@@ -64,8 +45,8 @@ def _call_openai(
         )
         return response.choices[0].message.content.strip()
 
-    except Exception as exc:
-        return _rule_based_advice(detected_items, suggestions, style) + f" (OpenAI недоступен: {exc})"
+    except Exception:
+        return _rule_based_advice(detected_items, suggestions, style)
 
 
 def _rule_based_advice(
@@ -73,29 +54,17 @@ def _rule_based_advice(
     suggestions: Dict[str, List[str]],
     style: str,
 ) -> str:
-    style_tips = {
-        "casual": (
-            "Для повседневного образа делайте ставку на базовые вещи: белая футболка, "
-            "тёмные джинсы и белые кроссовки никогда не подводят."
-        ),
-        "formal": (
-            "Для формального стиля выбирайте монохромные или нейтральные оттенки, "
-            "аккуратный крой и минимум принтов."
-        ),
-        "sporty": (
-            "Спортивный образ выигрывает от функциональных тканей, контрастных акцентов "
-            "и удобной обуви для активности."
-        ),
+    tips = {
+        "casual": "Берите базу: белую футболку, джинсы и кроссовки. Не прогадаете.",
+        "formal": "Нейтральные тона, чёткий крой, минимум деталей. Классика.",
+        "sporty": "Спорт: удобная обувь, свободный крой, контрастные цвета.",
     }
-
-    base = style_tips.get(style, style_tips["casual"])
-
-    add_parts = []
-    for cat, items in list(suggestions.items())[:2]:
+    
+    result = tips.get(style, tips["casual"])
+    
+    for cat, items in suggestions.items():
         if items:
-            add_parts.append(f"Хорошим дополнением станут {items[0]}")
-
-    if add_parts:
-        base += " " + ". ".join(add_parts) + "."
-
-    return base
+            result += f" Из {cat} добавьте {items[0]}."
+            break
+    
+    return result
