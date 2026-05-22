@@ -64,11 +64,11 @@ Fashion AI
 Структура файлов
 
 app/
-  detection.py      - логика YOLO + CLIP
-  recommendations.py - правила рекомендаций
-  main.py           - FastAPI endpoints
-  gradio_app.py     - веб-интерфейс
-  llm_helper.py     - генерация текстовых советов
+  - detection.py      - логика YOLO + CLIP
+  - recommendations.py - правила рекомендаций
+  - main.py           - FastAPI endpoints
+  - gradio_app.py     - веб-интерфейс
+  - llm_helper.py     - генерация текстовых советов
 
 Требования
 
