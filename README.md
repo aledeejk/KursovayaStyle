@@ -21,16 +21,16 @@ Fashion AI
 
 Как запустить
 
-1. Установить зависимости:
+1. Перейти в папку с проектом
+2. Создать venv:
+   python -m venv venv
+3. Активировать venv:
+   .\venv\Scripts\activate
+4. Установить зависимости:
    pip install -r requirements.txt
-
-2. Запустить:
-   python run.py
-
-3. Открыть http://localhost:7860 в браузере
-
-Если нужен только API без интерфейса:
-   python run.py --api-only
+5. Запустить:
+   $env:YOLO_MODEL="yolov8-fashion.pt"; python run.py 
+6. Открыть http://localhost:7860 в браузере
 
 Что есть сейчас
 
